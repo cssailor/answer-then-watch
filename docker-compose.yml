@@ -1,0 +1,27 @@
+services:
+  tvgate:
+    build: ./tvgate
+    container_name: tvgate
+    restart: unless-stopped
+
+    # host 网络：控制器能自动拿到本机局域网 IP 传给电视端 App。
+    # 如果 NAS 不支持 host 网络（如 iStoreOS），改用 tvgate/docker-compose.yml。
+    network_mode: host
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    volumes:
+      - ./data:/app/data
+      - ./adb:/root/.android
+      - ./tvgate/questions.json:/app/questions.json:ro
+
+    command:
+      - "--firetv"
+      - "${FIRE_TV_IP:?请在 .env 里设置 FIRE_TV_IP}"
+      - "--interval"
+      - "${INTERVAL:-600}"
+      - "--port"
+      - "8765"
+      - "--db"
+      - "/app/data/tvgate.db"
