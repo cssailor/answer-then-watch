@@ -41,6 +41,7 @@ def ensure_tk():
 
 DEFAULT_SETTINGS = {
     "interval_seconds": "600",
+    "poll_seconds": "2",
     "max_difficulty": "3",
     "answer_timeout_seconds": "120",
     "quiz_enabled": "1",
@@ -1577,7 +1578,7 @@ def settings_page(conn):
             % (name, " checked" if value == "1" else "", label, help_text)
         )
 
-    grid = (
+    general = (
         field("检查间隔（秒）", "interval_seconds",
               "每看满多少秒弹一次题。这是弹题频率，不是单次观看上限。",
               s.get("interval_seconds", "600"), "5")
@@ -1590,6 +1591,24 @@ def settings_page(conn):
         + field("每次暂停需答对题数（1–5）", "correct_required",
                 "一次暂停要答对几题才恢复播放。",
                 s.get("correct_required", "1"), "1", "5")
+    )
+    general_checks = (
+        check("require_consecutive", s.get("require_consecutive", "1"),
+              "必须连续答对",
+              "勾选后答错会清零已答对进度；不勾则按累计答对数计算。")
+        + check("prefer_wrong", s.get("prefer_wrong", "1"),
+                "优先出错题本里的题",
+                "每次出题先从未掌握的错题里选，再回退到普通题库。")
+        + check("quiz_enabled", s.get("quiz_enabled", "1"),
+                "开启答题检查",
+                "关闭后不弹常规检查点；单次观看上限和两次观看间隔仍会触发刷题。")
+    )
+
+    advanced = (
+        field("ADB 轮询间隔（秒）", "poll_seconds",
+              "控制器多久读取一次 Fire TV 状态。越小反应越快，但 ADB 调用更频繁；"
+              "默认 2 秒。",
+              s.get("poll_seconds", "2"), "1", "10")
         + field("观看会话间隔（秒）", "view_gap_seconds",
                 "统计用：中途离开超过这个秒数就算新的一次观看；不影响弹题。",
                 s.get("view_gap_seconds", "180"), "60", "3600")
@@ -1615,22 +1634,15 @@ def settings_page(conn):
                 "", kind="text")
     )
 
-    checks = (
-        check("require_consecutive", s.get("require_consecutive", "1"),
-              "必须连续答对",
-              "勾选后答错会清零已答对进度；不勾则按累计答对数计算。")
-        + check("prefer_wrong", s.get("prefer_wrong", "1"),
-                "优先出错题本里的题",
-                "每次出题先从未掌握的错题里选，再回退到普通题库。")
-        + check("quiz_enabled", s.get("quiz_enabled", "1"),
-                "开启答题检查",
-                "关闭后不弹常规检查点；单次观看上限和两次观看间隔仍会触发刷题。")
-    )
-
     form = (
         "<form method='post' action='/settings'>"
-        "<div class='grid2'>" + grid + "</div>"
-        + checks
+        "<h2 style='margin-top:0'>通用设置</h2>"
+        "<div class='sub'>题目与答题相关</div>"
+        "<div class='grid2'>" + general + "</div>"
+        + general_checks
+        + "<h2>高级设置</h2>"
+        "<div class='sub'>时长、ADB 与系统行为</div>"
+        "<div class='grid2'>" + advanced + "</div>"
         + "<div style='margin-top:16px'>"
           "<button class='btn' type='submit'>保存设置</button></div>"
           "</form>"
@@ -1656,6 +1668,7 @@ def save_settings(conn, form):
         return str(max(lo, min(hi, value)))
 
     set_setting(conn, "interval_seconds", clamp_int("interval_seconds", 600, 5, 86400))
+    set_setting(conn, "poll_seconds", clamp_int("poll_seconds", 2, 1, 10))
     set_setting(conn, "max_difficulty", clamp_int("max_difficulty", 3, 1, 10))
     set_setting(conn, "answer_timeout_seconds", clamp_int("answer_timeout_seconds", 120, 10, 3600))
     set_setting(conn, "correct_required", clamp_int("correct_required", 1, 1, 5))
@@ -2178,6 +2191,7 @@ class FireTVController:
         self.require_consecutive = True
         self.prefer_wrong = True
         self.correct_count = 0
+        self.poll_seconds = 2
         self.suspend_until = 0.0
         self.suspend_activity = time.time()
         self.drill_active = False
@@ -2370,7 +2384,7 @@ class FireTVController:
                 self._tick()
             except Exception as exc:
                 print("[tvgate] 控制循环异常：%s" % exc)
-            time.sleep(2)
+            time.sleep(max(1, min(10, self.poll_seconds)))
 
     def _settings(self):
         try:
@@ -2386,6 +2400,7 @@ class FireTVController:
             interval = max(5, int(settings["interval_seconds"]))
             self.max_difficulty = max(1, int(settings["max_difficulty"]))
             self.timeout = max(10, int(settings["answer_timeout_seconds"]))
+            self.poll_seconds = max(1, min(10, int(settings.get("poll_seconds", "2"))))
             self.correct_required = max(1, min(5, int(settings.get("correct_required", "1"))))
             self.require_consecutive = settings.get("require_consecutive", "1") == "1"
             self.prefer_wrong = settings.get("prefer_wrong", "1") == "1"

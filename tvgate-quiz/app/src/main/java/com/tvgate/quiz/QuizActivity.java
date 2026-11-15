@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -22,6 +23,7 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -52,6 +54,8 @@ public class QuizActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private LinearLayout optionsBox;
+    private ScrollView scrollView;
+    private float uiScale = 1f;
     private TextView stemView;
     private TextView metaView;
     private TextView messageView;
@@ -162,45 +166,67 @@ public class QuizActivity extends Activity {
     }
 
     private void buildUi() {
+        Configuration cfg = getResources().getConfiguration();
+        float scale = Math.min(cfg.screenWidthDp / 960f, cfg.screenHeightDp / 540f);
+        uiScale = Math.max(0.78f, Math.min(1.25f, scale));
+        int padH = dp(Math.round(48 * uiScale));
+        int padV = dp(Math.round(26 * uiScale));
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.parseColor("#0B0D12"));
-        root.setPadding(dp(72), dp(44), dp(72), dp(44));
+        root.setPadding(padH, padV, padH, padV);
 
         metaView = new TextView(this);
         metaView.setTextColor(Color.parseColor("#7F8EA3"));
-        metaView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        metaView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15 * uiScale);
         root.addView(metaView);
+
+        scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.setVerticalScrollBarEnabled(false);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
 
         stemView = new TextView(this);
         stemView.setTextColor(Color.parseColor("#F2F5F9"));
-        stemView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
+        stemView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26 * uiScale);
         stemView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        stemView.setPadding(0, dp(22), 0, dp(26));
-        root.addView(stemView);
+        stemView.setPadding(0, dp(Math.round(12 * uiScale)), 0,
+                dp(Math.round(14 * uiScale)));
+        content.addView(stemView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
 
         optionsBox = new LinearLayout(this);
         optionsBox.setOrientation(LinearLayout.VERTICAL);
-        root.addView(optionsBox, new LinearLayout.LayoutParams(
+        content.addView(optionsBox, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        scrollView.addView(content);
+        root.addView(scrollView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         messageView = new TextView(this);
         messageView.setTextColor(Color.WHITE);
-        messageView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        messageView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18 * uiScale);
         root.addView(messageView);
 
         countdownView = new TextView(this);
         countdownView.setTextColor(Color.parseColor("#7F8EA3"));
-        countdownView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        countdownView.setPadding(0, dp(6), 0, 0);
+        countdownView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14 * uiScale);
+        countdownView.setPadding(0, dp(Math.round(4 * uiScale)), 0, 0);
         root.addView(countdownView);
 
         Button exitButton = new Button(this);
         exitButton.setText("家长退出");
-        exitButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        exitButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13 * uiScale);
         exitButton.setTextColor(Color.parseColor("#8b95a5"));
         exitButton.setBackground(optionBackground());
-        exitButton.setPadding(dp(18), dp(6), dp(18), dp(6));
+        exitButton.setPadding(dp(Math.round(16 * uiScale)), dp(Math.round(5 * uiScale)),
+                dp(Math.round(16 * uiScale)), dp(Math.round(5 * uiScale)));
         exitButton.setOnClickListener(v -> showExitDialog());
         exitButton.setOnLongClickListener(v -> {
             showServerDialog(false);
@@ -210,7 +236,7 @@ public class QuizActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         exitLp.gravity = Gravity.END;
-        exitLp.topMargin = dp(8);
+        exitLp.topMargin = dp(Math.round(6 * uiScale));
         root.addView(exitButton, exitLp);
 
         setContentView(root);
@@ -277,7 +303,11 @@ public class QuizActivity extends Activity {
                 }
             }
             metaView.setText(meta);
-            stemView.setText(current.getString("stem"));
+            String stemText = current.getString("stem");
+            int stemLen = stemText.length();
+            float stemSp = stemLen > 90 ? 21 : (stemLen > 50 ? 24 : 28);
+            stemView.setTextSize(TypedValue.COMPLEX_UNIT_SP, stemSp * uiScale);
+            stemView.setText(stemText);
             setMessage("", "#FFFFFF");
 
             optionsBox.removeAllViews();
@@ -286,9 +316,12 @@ public class QuizActivity extends Activity {
                 final int index = i;
                 Button button = new Button(this);
                 button.setText((i + 1) + ".  " + options.getString(i));
-                button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 23);
+                button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19 * uiScale);
                 button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-                button.setPadding(dp(24), dp(12), dp(24), dp(12));
+                button.setPadding(dp(Math.round(16 * uiScale)),
+                        dp(Math.round(9 * uiScale)),
+                        dp(Math.round(16 * uiScale)),
+                        dp(Math.round(9 * uiScale)));
                 button.setAllCaps(false);
                 button.setBackground(optionBackground());
                 button.setTextColor(Color.parseColor("#E6EBF2"));
@@ -297,8 +330,11 @@ public class QuizActivity extends Activity {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT);
-                lp.bottomMargin = dp(12);
+                lp.bottomMargin = dp(Math.round(7 * uiScale));
                 optionsBox.addView(button, lp);
+            }
+            if (scrollView != null) {
+                scrollView.post(() -> scrollView.fullScroll(View.FOCUS_UP));
             }
             if (optionsBox.getChildCount() > 0) {
                 optionsBox.getChildAt(0).requestFocus();
