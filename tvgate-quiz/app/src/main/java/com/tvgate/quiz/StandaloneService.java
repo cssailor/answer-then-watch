@@ -1,10 +1,14 @@
 package com.tvgate.quiz;
 
+import android.app.AppOpsManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.app.usage.UsageEvents;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
@@ -12,14 +16,34 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 /**
  * 常驻后端服务：前台服务保活，内嵌 HTTP server，本地计时并在到点时拉起答题界面。
- * 开机自启由 BootReceiver 触发。
+ * 观看判断优先用 UsageStats（精确前台 App），未授权时回退到 isMusicActive。
  */
 public class StandaloneService extends Service {
 
     private static final int NOTIF_ID = 1;
     private static final String CHANNEL_ID = "tvgate";
+
+    /** 桌面 / 设置 / 系统类包名：这些前台 App 不算「在看」。 */
+    private static final Set<String> LAUNCHER = new HashSet<>(Arrays.asList(
+            "com.tvgate.quiz",
+            "com.amazon.tv.launcher", "com.amazon.venezia",
+            "com.amazon.tv.settings", "com.amazon.tv.settings.v2",
+            "com.amazon.device.settings", "com.amazon.tv.notificationcenter",
+            "com.amazon.ftv.screensaver", "com.amazon.tv.oobe",
+            "com.dangbei.tvlauncher", "com.dangbeimarket",
+            "com.google.android.tvlauncher",
+            "com.android.tv.settings", "com.android.settings",
+            "com.android.systemui",
+            "com.xiaomi.mitv.tvhome", "com.xiaomi.mitv.settings",
+            "com.xiaomi.mitv.appstore"
+    ));
 
     private Core core;
     private WebServer web;
@@ -81,14 +105,12 @@ public class StandaloneService extends Service {
         double delta = (now - lastTick) / 1000.0;
         lastTick = now;
 
-        boolean suspended = "1".equals(core.get("suspended", "0"));
-        if (suspended) {
+        if ("1".equals(core.get("suspended", "0"))) {
             accumulated = 0;
             return;
         }
 
-        boolean watching = audio != null && audio.isMusicActive();
-        if (watching) {
+        if (isWatching()) {
             accumulated += delta;
             core.recordView(delta);
         }
@@ -100,6 +122,66 @@ public class StandaloneService extends Service {
                 launchQuiz();
             }
         }
+    }
+
+    private boolean isWatching() {
+        String fg = foregroundPackage();
+        if (fg != null) {
+            return !isLauncher(fg);
+        }
+        // UsageStats 未授权时回退到音频判断
+        return audio != null && audio.isMusicActive();
+    }
+
+    private boolean isLauncher(String pkg) {
+        return pkg != null && LAUNCHER.contains(pkg);
+    }
+
+    // ---------------------------------------------------------------- UsageStats
+
+    public boolean hasUsageStats() {
+        try {
+            AppOpsManager appOps = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+            int mode = appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    android.os.Process.myUid(), getPackageName());
+            return mode == AppOpsManager.MODE_ALLOWED;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String foregroundPackage() {
+        if (!hasUsageStats()) return null;
+        try {
+            UsageStatsManager usm = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
+            long now = System.currentTimeMillis();
+            String current = null;
+            UsageEvents events = usm.queryEvents(now - 10 * 60 * 1000L, now);
+            UsageEvents.Event e = new UsageEvents.Event();
+            while (events.hasNextEvent()) {
+                events.getNextEvent(e);
+                int t = e.getEventType();
+                if (t == UsageEvents.Event.MOVE_TO_FOREGROUND
+                        || t == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    current = e.getPackageName();
+                } else if (t == UsageEvents.Event.MOVE_TO_BACKGROUND) {
+                    current = null;
+                }
+            }
+            if (current != null) return current;
+            // 事件窗口内没有前台切换：取最近使用的 App
+            List<UsageStats> stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY,
+                    now - 60 * 60 * 1000L, now);
+            UsageStats top = null;
+            for (UsageStats s : stats) {
+                if (top == null || s.getLastTimeUsed() > top.getLastTimeUsed()) top = s;
+            }
+            if (top != null && top.getLastTimeUsed() > now - 60 * 1000L) {
+                return top.getPackageName();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private void launchQuiz() {
