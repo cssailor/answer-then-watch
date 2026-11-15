@@ -2,11 +2,11 @@
 
 **让孩子先答题，再看电视。**
 
-> **注意：你现在在 `standalone-apk` 分支。**
-> 这个分支把后端管理逻辑整合进了 APK，盒子自己运行后端，**不需要 NAS/树莓派**，
-> 桌面直接显示管理地址和二维码。详见 [tvgate-quiz/STANDALONE.md](tvgate-quiz/STANDALONE.md)，
-> 其中包含两种部署方式的优缺点对比。
-> 默认分支 `main` 是「NAS 后端 + 瘦 APK」方案。
+> **注意：这个分支已拆分到独立仓库。**
+> `standalone-apk` 分支的「后端整合进 APK」方案已迁移到独立项目
+> [answer-then-watch-standalone](https://github.com/cssailor/answer-then-watch-standalone)，
+> 后续请在独立仓库中维护和下载。本分支仅保留作为对照，不再更新。
+> 默认分支 `main` 仍是「NAS 后端 + 瘦 APK」方案。
 
 一台常开的 NAS / 树莓派 + 一个隐藏入口的 Fire TV 答题 App，把「看电视」变成
 「每看一段，先答对题」。家长后台能看知识点掌握、错题本、观看时长，并一键导出
