@@ -2095,6 +2095,26 @@ def firetv_foreground(serial):
     return ""
 
 
+def firetv_screen_on(serial):
+    """屏幕是否亮着：True=亮（含屏保），False=睡眠/关屏，None=ADB 断开无法判断。
+
+    优先用 Display Power state；屏保（Dreaming）时屏幕仍亮、state=ON，
+    不算睡眠；只有真正睡眠（Asleep / state=OFF）才判定为关屏。
+    """
+    rc, out, _ = adb_run(serial, "shell", "dumpsys", "power", timeout=10)
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if "Display Power: state=" in line:
+            return "state=ON" in line or "state=on" in line
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("mWakefulness="):
+            return line.split("=", 1)[1].strip() in ("Awake", "Dreaming")
+    return True  # 读不到就当作亮屏，避免误恢复
+
+
 class ViewTracker:
     """把每 2 秒的观看状态聚合成观看会话，写入 view_sessions。
 
@@ -2452,11 +2472,14 @@ class FireTVController:
         if self.suspended:
             clear_suspend = False
             adb_offline = (media_state == -1 and media_pkg is None)
-            if adb_offline:
+            screen_on = firetv_screen_on(self.serial)
+            if screen_on is False:
+                clear_suspend = True  # 睡眠/关屏：立即恢复管控
+            elif adb_offline:
                 if self.offline_since is None:
                     self.offline_since = now
                 if now - self.offline_since >= 15:
-                    clear_suspend = True
+                    clear_suspend = True  # 关机：ADB 断开超过 15 秒
             else:
                 self.offline_since = None
             with self.lock:
