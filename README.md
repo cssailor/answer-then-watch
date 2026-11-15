@@ -9,6 +9,10 @@
 > 适合家里有 Fire TV Stick、希望限制观看时长并顺带复习的家长。
 > 完全自托管，数据留在自己的 NAS 上，不依赖任何云服务。
 
+> **不想用 NAS？** 本项目另有一个「独立版」，把后端整合进 APK，盒子自跑服务、
+> 免 adb、桌面扫码即管理，见独立仓库
+> [answer-then-watch-standalone](https://github.com/cssailor/answer-then-watch-standalone)。
+
 ---
 
 ## 它解决什么问题
