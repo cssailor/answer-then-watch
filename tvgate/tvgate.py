@@ -48,13 +48,13 @@ DEFAULT_SETTINGS = {
     "correct_required": "1",
     "require_consecutive": "1",
     "prefer_wrong": "1",
+    "wrong_review_delay_hours": "24",
     "view_gap_seconds": "180",
     "max_view_minutes": "0",
     "drill_minutes": "10",
     "cooldown_minutes": "0",
-    "parent_suspend_minutes": "30",
     "parent_reset_minutes": "10",
-    "suspend_until": "0",
+    "suspended": "0",
     "admin_pin": "1234",
 }
 
@@ -126,7 +126,8 @@ def init_db(conn, bank_path=BANK_PATH):
             first_wrong_ts REAL,
             last_wrong_ts  REAL,
             wrong_count    INTEGER NOT NULL DEFAULT 0,
-            resolved_ts    REAL
+            resolved_ts    REAL,
+            review_after_ts REAL NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS view_sessions (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +145,10 @@ def init_db(conn, bank_path=BANK_PATH):
     )
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    # 老库迁移：wrong_book 补 review_after_ts 列
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(wrong_book)").fetchall()]
+    if "review_after_ts" not in cols:
+        conn.execute("ALTER TABLE wrong_book ADD COLUMN review_after_ts REAL NOT NULL DEFAULT 0")
     # 只在首次初始化时导入题库；之后以数据库为准，网页里的增删改不会被重启覆盖。
     if conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 0:
         load_bank(conn, bank_path)
@@ -173,22 +178,34 @@ def log_attempt(conn, session_id, q, correct, timed_out, response_ms):
         (now, session_id, q["id"], q["subject"], q["kp"], q["difficulty"],
          1 if correct else 0, 1 if timed_out else 0, response_ms),
     )
-    if not correct and q["id"]:
-        row = conn.execute(
-            "SELECT wrong_count FROM wrong_book WHERE question_id=?", (q["id"],)
-        ).fetchone()
-        if row:
+    if q["id"]:
+        if correct:
+            # 答对即移出错题本（resolved），下次再错会重新加入
             conn.execute(
-                "UPDATE wrong_book SET last_wrong_ts=?, wrong_count=?, resolved_ts=NULL"
-                " WHERE question_id=?",
-                (now, row["wrong_count"] + 1, q["id"]),
+                "UPDATE wrong_book SET resolved_ts=? WHERE question_id=? AND resolved_ts IS NULL",
+                (now, q["id"]),
             )
         else:
-            conn.execute(
-                "INSERT INTO wrong_book(question_id, first_wrong_ts, last_wrong_ts,"
-                " wrong_count, resolved_ts) VALUES(?, ?, ?, 1, NULL)",
-                (q["id"], now, now),
-            )
+            try:
+                delay_hours = int(read_settings(conn).get("wrong_review_delay_hours", "24"))
+            except (TypeError, ValueError):
+                delay_hours = 24
+            review_after = now + max(0, delay_hours) * 3600
+            row = conn.execute(
+                "SELECT wrong_count FROM wrong_book WHERE question_id=?", (q["id"],)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE wrong_book SET last_wrong_ts=?, wrong_count=?, resolved_ts=NULL,"
+                    " review_after_ts=? WHERE question_id=?",
+                    (now, row["wrong_count"] + 1, review_after, q["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO wrong_book(question_id, first_wrong_ts, last_wrong_ts,"
+                    " wrong_count, resolved_ts, review_after_ts) VALUES(?, ?, ?, 1, NULL, ?)",
+                    (q["id"], now, now, review_after),
+                )
     conn.commit()
 
 
@@ -196,23 +213,27 @@ def pick_question(conn, difficulty, kp=None, exclude=frozenset(), used=frozenset
                   prefer_wrong=False):
     """同知识点优先；排除本次检查点已出过的题；尽量不出重复题。
 
-    prefer_wrong=True 时先从未掌握的错题本里选（难度不高于当前档），
-    再回退到普通题库。
+    prefer_wrong=True 时先从未掌握、且已到复习时间的错题里选
+    （难度不高于当前档）。错题的复习节奏由 review_after_ts 控制：
+    刚答错的题会推迟到第二天（wrong_review_delay_hours）才再次优先，
+    因此本次观看中不会反复出同一道错题；答对后自动移出错题本。
     """
     if prefer_wrong:
         sql = (
             "SELECT q.* FROM wrong_book w JOIN questions q ON q.id = w.question_id"
             " WHERE w.resolved_ts IS NULL AND q.difficulty <= ?"
+            " AND (w.review_after_ts IS NULL OR w.review_after_ts <= ?)"
         )
-        args = [difficulty]
+        args = [difficulty, time.time()]
         if kp:
             sql += " AND q.kp = ?"
             args.append(kp)
-        sql += " ORDER BY w.last_wrong_ts DESC"
+        # 最早答错、最久没复习的优先
+        sql += " ORDER BY w.review_after_ts ASC, w.last_wrong_ts ASC"
         rows = [r for r in conn.execute(sql, args).fetchall() if r["id"] not in exclude]
         if rows:
-            fresh = [r for r in rows if r["id"] not in used]
-            return random.choice(fresh or rows)
+            return random.choice(rows)
+        # 没有可用的错题时，回退到普通题库
 
     def rows_for(kp_filter):
         if kp_filter:
@@ -1543,17 +1564,16 @@ def import_questions_payload(conn, raw):
 def settings_page(conn):
     s = read_settings(conn)
 
-    until = float(s.get("suspend_until", "0") or 0)
-    remaining = max(0, int((until - time.time()) / 60))
     suspend_note = ""
-    if remaining > 0:
+    if s.get("suspended", "0") == "1":
         suspend_note = (
             "<div class='card' style='margin-bottom:14px'>"
             "<div class='k'>家长模式</div>"
-            "<div class='v'>剩余约 %d 分钟</div>"
+            "<div class='v'>本次会话不检查</div>"
+            "<div class='help'>关机再开机后自动恢复管控。</div>"
             "<form method='post' action='/suspend/clear' style='margin-top:10px'>"
             "<button class='btn small' type='submit'>立即恢复管控</button>"
-            "</form></div>" % remaining
+            "</form></div>"
         )
 
     def field(label, name, help_text, value="", minv="", maxv="", kind="number"):
@@ -1591,6 +1611,10 @@ def settings_page(conn):
         + field("每次暂停需答对题数（1–5）", "correct_required",
                 "一次暂停要答对几题才恢复播放。",
                 s.get("correct_required", "1"), "1", "5")
+        + field("错题复习延迟（小时）", "wrong_review_delay_hours",
+                "答错的题要等多久才再次被优先出题。默认 24 = 第二天，48 = 第三天；"
+                "本次观看内不会马上重复出同一道错题。",
+                s.get("wrong_review_delay_hours", "24"), "1", "168")
     )
     general_checks = (
         check("require_consecutive", s.get("require_consecutive", "1"),
@@ -1622,12 +1646,9 @@ def settings_page(conn):
                 "一次观看结束后，在这个时间内又开始看，会直接进入刷题，"
                 "直到间隔结束；0 表示关闭。",
                 s.get("cooldown_minutes", "0"), "0", "720")
-        + field("家长退出暂停时长（分钟）", "parent_suspend_minutes",
-                "在电视上输入 PIN 退出后，暂停管控多久。",
-                s.get("parent_suspend_minutes", "30"), "1", "720")
         + field("家长模式闲置重置（分钟）", "parent_reset_minutes",
                 "家长退出后，电视闲置超过这个时间就自动恢复管控；"
-                "下次开电视默认受控。",
+                "关机再开机也会恢复管控。",
                 s.get("parent_reset_minutes", "10"), "1", "120")
         + field("家长端 PIN", "admin_pin",
                 "4–12 位字母数字；后台登录和 TV 端退出共用。留空不改。",
@@ -1672,12 +1693,12 @@ def save_settings(conn, form):
     set_setting(conn, "max_difficulty", clamp_int("max_difficulty", 3, 1, 10))
     set_setting(conn, "answer_timeout_seconds", clamp_int("answer_timeout_seconds", 120, 10, 3600))
     set_setting(conn, "correct_required", clamp_int("correct_required", 1, 1, 5))
+    set_setting(conn, "wrong_review_delay_hours",
+                clamp_int("wrong_review_delay_hours", 24, 1, 168))
     set_setting(conn, "view_gap_seconds", clamp_int("view_gap_seconds", 180, 60, 3600))
     set_setting(conn, "max_view_minutes", clamp_int("max_view_minutes", 0, 0, 240))
     set_setting(conn, "drill_minutes", clamp_int("drill_minutes", 10, 1, 60))
     set_setting(conn, "cooldown_minutes", clamp_int("cooldown_minutes", 0, 0, 720))
-    set_setting(conn, "parent_suspend_minutes",
-                clamp_int("parent_suspend_minutes", 30, 1, 720))
     set_setting(conn, "parent_reset_minutes",
                 clamp_int("parent_reset_minutes", 10, 1, 120))
     set_setting(conn, "require_consecutive", "1" if "require_consecutive" in form else "0")
@@ -1875,7 +1896,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return self._send("forbidden", 403)
             conn = connect()
             try:
-                set_setting(conn, "suspend_until", "0")
+                set_setting(conn, "suspended", "0")
             finally:
                 conn.close()
             return self._send("", 302, [("Location", "/settings")])
@@ -2192,7 +2213,8 @@ class FireTVController:
         self.prefer_wrong = True
         self.correct_count = 0
         self.poll_seconds = 2
-        self.suspend_until = 0.0
+        self.suspended = False
+        self.offline_since = None
         self.suspend_activity = time.time()
         self.drill_active = False
         self.drill_until = 0.0
@@ -2324,19 +2346,18 @@ class FireTVController:
                 "next": self._drill_payload(nxt), "drill_count": self.drill_count}
 
     def parent_exit(self, pin):
-        """家长 PIN 验证通过后退出答题，并暂停管控一段时间。"""
+        """家长 PIN 验证通过后退出答题，本次开机/会话内不再检查。
+
+        关机再开机后自动恢复管控；也可以在后端点「立即恢复管控」提前恢复。
+        """
         settings = read_settings(self.conn)
         actual = settings.get("admin_pin", "")
         if not pin or not actual or not hmac.compare_digest(str(pin), str(actual)):
             return {"ok": False, "error": "密码错误"}
-        try:
-            minutes = int(settings.get("parent_suspend_minutes", "30"))
-        except (TypeError, ValueError):
-            minutes = 30
-        minutes = max(1, min(720, minutes))
-        until = time.time() + minutes * 60
-        set_setting(self.conn, "suspend_until", str(until))
+        set_setting(self.conn, "suspended", "1")
         with self.lock:
+            self.suspended = True
+            self.offline_since = None
             self.active = False
             self.current = None
             self.pending_resume = True
@@ -2348,7 +2369,7 @@ class FireTVController:
             self.drill_question = None
             self.drill_count = 0
             self.suspend_activity = time.time()
-        return {"ok": True, "minutes": minutes, "until": until}
+        return {"ok": True}
 
     def _payload(self, question):
         return {
@@ -2405,7 +2426,7 @@ class FireTVController:
             self.require_consecutive = settings.get("require_consecutive", "1") == "1"
             self.prefer_wrong = settings.get("prefer_wrong", "1") == "1"
             self.view.gap = max(60, min(3600, int(settings.get("view_gap_seconds", "180"))))
-            self.suspend_until = float(settings.get("suspend_until", "0") or 0)
+            self.suspended = settings.get("suspended", "0") == "1"
             self.max_view_seconds = max(0, int(settings.get("max_view_minutes", "0"))) * 60
             self.drill_seconds = max(60, int(settings.get("drill_minutes", "10")) * 60)
             self.cooldown_seconds = max(0, int(settings.get("cooldown_minutes", "0"))) * 60
@@ -2426,9 +2447,18 @@ class FireTVController:
                 and not foreground.startswith(QUIZ_PACKAGE):
             watching = foreground
 
-        # 1) 家长模式：不弹题、不计观看；电视闲置超过 parent_reset_minutes 自动恢复管控
-        if now < self.suspend_until:
+        # 1) 家长退出：本次会话不弹题、不计观看。
+        #    关机（ADB 断开超过 15 秒）或闲置超过 parent_reset_minutes 后恢复管控。
+        if self.suspended:
             clear_suspend = False
+            adb_offline = (media_state == -1 and media_pkg is None)
+            if adb_offline:
+                if self.offline_since is None:
+                    self.offline_since = now
+                if now - self.offline_since >= 15:
+                    clear_suspend = True
+            else:
+                self.offline_since = None
             with self.lock:
                 self.view.pause(now)
                 self.accumulated = 0.0
@@ -2442,8 +2472,9 @@ class FireTVController:
                     self.current = None
                     self.pending_resume = True
             if clear_suspend:
-                set_setting(self.conn, "suspend_until", "0")
-                self.suspend_until = 0.0
+                set_setting(self.conn, "suspended", "0")
+                self.suspended = False
+                self.offline_since = None
                 self.view.last_ended = 0.0
             else:
                 if self.pending_resume:
@@ -2688,7 +2719,8 @@ def selftest():
         ok = True
 
         print("== 题库检查 ==")
-        for difficulty in range(1, 6):
+        avail = conn.execute("SELECT MAX(difficulty) AS m FROM questions").fetchone()["m"]
+        for difficulty in range(1, avail + 1):
             rows = conn.execute(
                 "SELECT kp, COUNT(*) AS n FROM questions WHERE difficulty=? GROUP BY kp",
                 (difficulty,)).fetchall()
@@ -2711,8 +2743,10 @@ def selftest():
         print("\n== 模拟一次观看（5 个检查点）==")
         random.seed(7)
         for block in range(1, 6):
-            difficulty = min(block, 5)
+            difficulty = min(block, avail)
             question = pick_question(conn, difficulty)
+            if question is None:
+                question = pick_question(conn, 1)
             correct = (block % 2 == 0)
             log_attempt(conn, "selftest", question, correct, False,
                         random.randint(2000, 20000))

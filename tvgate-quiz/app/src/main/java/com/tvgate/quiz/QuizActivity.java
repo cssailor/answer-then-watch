@@ -530,9 +530,8 @@ public class QuizActivity extends Activity {
                 JSONObject resp = new JSONObject(respText);
                 ui.post(() -> {
                     if (resp.optBoolean("ok", false)) {
-                        int minutes = resp.optInt("minutes", 30);
                         dialog.dismiss();
-                        Toast.makeText(this, "已退出，家长模式 " + minutes + " 分钟",
+                        Toast.makeText(this, "已退出，本次观看不再检查",
                                 Toast.LENGTH_LONG).show();
                         finished = true;
                         finish();
